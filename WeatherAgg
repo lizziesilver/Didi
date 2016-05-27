@@ -1,0 +1,64 @@
+##Weather agg
+files_weather <- list.files(path="C:/Users/zachary.demby/Desktop/Didi/Data/season_1/training_data/weather_data", full.names=T, recursive=FALSE)
+colnames_weather <- c("Time", "Weather", "temperature", "PM2.5")
+
+
+##intiialize empty df
+new_dc_weather <- data.frame(Time = as.POSIXct(character()),Weather = numeric() ,
+                             temperature = double(),
+                             "PM2.5" = double())
+
+##Function to read in table, seperate by district and create new file
+agg_weather <- lapply(files_weather, function(x) {
+    t <- read.table(x, header=F,sep ="\t" ) # load file
+    colnames(t) <- colnames_weather
+    new_dc_weather <- rbind(new_dc_weather, t)
+  })
+new_weather <- do.call("rbind", agg_weather)
+
+##bucket into correct times 
+new_weather$hour <- hour(new_weather$Time) + minute(new_weather$Time)/60 + second(new_weather$Time)/3600
+bins <- seq(1, 144, 1)
+# Bin the data
+new_weather$bin <- cut(new_weather$hour, breaks = seq(0, 24,by = (1/6)), labels = bins)
+
+##Assign Date-Bin submission format 
+trim <- function (x) gsub( " .*$", "", x)
+new_weather$Date <- trim(new_weather$Time)
+new_weather$ts <- paste(trim(new_weather$Time), new_weather$bin, sep="-")
+
+write.csv(new_weather, "C:/Users/zachary.demby/Desktop/Didi/Data/Weather_agg/weather.csv")
+
+weather <- read.csv("C:/Users/zachary.demby/Desktop/Didi/Data/Weather_agg/weather.csv")
+ts <- as.data.frame(working$ts)
+colnames(ts) <- c("ts")
+
+weather$X <- NULL
+weather <- weather[!duplicated(weather),]
+weather$Time <- as.POSIXct(weather$Time)
+weather <- weather[order(weather$Time),]
+##take the weather data closest to begining of the time window bin
+t <- duplicated(weather$ts)
+new_weather <- weather[!t,c("Weather", "temperature", "PM2.5", "ts")]
+new_weather <- merge(ts, new_weather, all.x=T, by = "ts") 
+new_weather$Date = substr(new_weather$ts,1,10)
+new_weather$bin = as.numeric(substr(new_weather$ts,12,nchar(as.character(new_weather$ts))))
+
+
+new_weather <- new_weather[order(new_weather$Date, new_weather$bin),]
+
+
+weather_zoo <- zoo(new_weather[, c("Weather")])
+temp_zoo <- zoo(new_weather[, c("temperature")])
+PM_zoo <- zoo(new_weather[, c("PM2.5")])
+
+new_weather_zoo <- na.approx(weather_zoo,x=index(weather_zoo), na.rm=F)
+new_temp_zoo <- na.approx(temp_zoo,x=index(temp_zoo), na.rm=F)
+new_PM_zoo <- na.approx(PM_zoo,x=index(PM_zoo), na.rm=F)
+
+full_weather_agg <- as.data.frame(cbind(ts = as.vector(ts$ts), Weather = new_weather_zoo,
+                                      temperature = new_temp_zoo, 
+                                      PM2.5 = new_PM_zoo ))
+
+
+write.csv(full_weather_agg, "C:/Users/zachary.demby/Desktop/Didi/Data/Weather_agg/full_weather.csv")
