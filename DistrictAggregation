@@ -1,0 +1,144 @@
+library(plyr)
+library(lubridate)
+library(parallel)
+
+##initiate cores
+no_cores <- detectCores() - 1
+c1 <- makeCluster(no_cores)
+stopCluster(c1)
+
+districts <- read.table("C:/Users/zachary.demby/Desktop/Didi/Data/season_1/training_data/cluster_map/cluster_map", "\t", header=FALSE)
+districts$V1 <- as.character(districts$V1)
+weather <- read.table("C:/Users/zachary.demby/Desktop/Didi/Data/season_1/training_data/weather_data/weather_data_2016-01-01","\t", header=FALSE)
+test <- read.table("C:/Users/zachary.demby/Desktop/Didi/Data/season_1/test_set_1/order_data/order_data_2016-01-22_test","\t", header=FALSE)
+
+##intiialize empty df
+new_dc <- data.frame(order_id = factor(),driver_id = factor(),  
+                     passenger_id = factor() , start_district_hash = factor(), 
+                       end_district_hash = factor(), 
+                     Price = numeric(), Time = as.POSIXct(character()))
+  
+##File Names - Orders
+files <- list.files(path="C:/Users/zachary.demby/Desktop/Didi/Data/test_data", full.names=T, recursive=FALSE)
+colnames_orders <- c("order_id", "driver_id",  "passenger_id", "start_district_hash", 
+                 "end_district_hash", "Price", "Time")
+#Weather
+files_weather <- list.files(path="C:/Users/zachary.demby/Desktop/Didi/Data/season_1/training_data/weather_data", full.names=T, recursive=FALSE)
+colnames_weather <- c("Time", "Weather", "temperature", "PM2.5")
+  
+##Function to read in table, seperate by district and create new file
+
+##district_hash <- districts[1, i]
+system.time(
+agg <- lapply(files, function(x) {
+  t <- read.table(x, header=F,sep ="\t" ) # load file
+  colnames(t) <- colnames_weather
+  new_table <- t[which(t$start_district_hash == district_hash),]
+  new_dc <- rbind(new_dc, new_table)
+  factor(new_dc$start_district_hash)
+  rm(t)
+  rm(new_table)
+  return(new_dc)
+})
+)
+
+new_agg <- do.call("rbind", agg)
+new_agg_weather <- do.call("rbind", agg_weather)
+district <- as.data.frame(unique(new_agg$start_district_hash))
+##will need to update if made into loop
+dmap <- merge(district, districts, by.x = "unique(new_agg$start_district_hash)" ,by.y = "V1", all.x = T)
+new_agg <- new_agg[!duplicated(new_agg),]
+
+##bucket into correct times 
+new_agg$hour <- hour(new_agg$Time) + minute(new_agg$Time)/60 + second(new_agg$Time)/3600
+bins <- seq(1, 144, 1)
+# Bin the data
+new_agg$bin <- cut(new_agg$hour, breaks = seq(0, 24,by = (1/6)), labels = bins)
+
+##Assign Date-Bin submission format 
+
+
+write.csv(new_agg, paste("C:/Users/zachary.demby/Desktop/Didi/Data/District_specific/",dmap[2], ".csv"))
+
+
+
+##include additional factors
+
+#This next step assumes that the data has been cleaned sufficiently
+##i.e. no incorrect duplicates, etc. and that a "Null" represents a missed pickup
+##i.e. the gap that is being predicted
+new_agg <- read.csv("C:/Users/zachary.demby/Desktop/Didi/Data/District_specific/1.csv")
+weather <- read.csv("C:/Users/zachary.demby/Desktop/Didi/Data/Weather_agg/full_weather.csv")
+traffic <- read.csv("C:/Users/zachary.demby/Desktop/Didi/Data/Traffic_agg/traffic_agg.csv")
+##Specify Bins
+bins <- seq(1, 144, 1)
+##aggregate by date and bin, sum total demand and gap 
+working <- ddply(new_agg, .(Date = strftime(Time,"%Y-%m-%d"), 
+                bins = cut(new_agg$hour, breaks = seq(0, 24,by = (1/6)), 
+                labels = bins)), summarize, Demand = length(order_id),
+                Gap = sum(driver_id == "NULL")) 
+s <- new_agg[is.na(new_agg$order_id),]
+##Assign submission time stamp
+working$ts <- paste(working$Date, working$bin, sep="-")
+
+##merge weather data points
+working_test <- merge(working, weather, by = "ts", all.x=T)
+
+#sort traffic df
+traffic_dc <- interpolate_traffic(traffic, district_hash)
+traffic <- read.csv("C:/Users/zachary.demby/Desktop/Didi/Data/Traffic_agg/traffic_agg.csv")
+
+##Pull in traffic data
+interpolate_traffic <- function(traffic, district_hash){
+  ts <- as.data.frame(working_test$ts)
+  colnames(ts) <- c("ts")
+  trim <- function (x) gsub( " .*$", "", x)
+  
+  traffic <- traffic[which(traffic$District.hash == district_hash),]
+  traffic$X <- NULL
+  traffic <- traffic[!duplicated(traffic),]
+  traffic$tj_time <- as.POSIXct(traffic$tj_time)
+  traffic <- traffic[order(traffic$tj_time),]
+  ##take the traffic data closest to begining of the time window bin
+  traffic$ts <- paste(trim(traffic$tj_time), traffic$bin, sep="-")
+  
+  t <- duplicated(traffic$ts)
+  new_traffic <- traffic[!t,]
+  merged_traffic <- merge.data.frame(ts, new_traffic, all.x=T, by = "ts") 
+  merged_traffic$Date = substr(merged_traffic$ts,1,10)
+  merged_traffic$bin = as.numeric(substr(merged_traffic$ts,12,nchar(as.character(merged_traffic$ts))))
+  merged_traffic$District.hash <- district_hash
+  merged_traffic <- merged_traffic[order(merged_traffic$Date, merged_traffic$bin),]
+  merged_traffic$ts <- as.factor(merged_traffic$ts)
+  s <- merged_traffic[rowSums(is.na(merged_traffic))>0,]
+  
+  tj_1_zoo <- zoo(merged_traffic[, c("tj_level_1")])
+  tj_2_zoo <- zoo(merged_traffic[, c("tj_level_2")])
+  tj_3_zoo <- zoo(merged_traffic[, c("tj_level_3")])
+  tj_4_zoo <- zoo(merged_traffic[, c("tj_level_4")])
+  
+  new_tj_1_zoo <- na.approx(tj_1_zoo,x=index(tj_1_zoo), na.rm=F, rule = 2)
+  new_tj_2_zoo <- na.approx(tj_2_zoo,x=index(tj_2_zoo), na.rm=F, rule = 2)
+  new_tj_3_zoo <- na.approx(tj_3_zoo,x=index(tj_3_zoo), na.rm=F, rule = 2)
+  new_tj_4_zoo <- na.approx(tj_4_zoo,x=index(tj_4_zoo), na.rm=F,rule = 2)
+  
+  
+  full_traffic_agg <- as.data.frame(cbind(ts = as.vector(merged_traffic$ts), tj_level_1 = new_tj_1_zoo,
+                                          tj_level_2 = new_tj_2_zoo,tj_level_3 = new_tj_3_zoo,
+                                          tj_level_4 = new_tj_4_zoo))
+  
+  return(full_traffic_agg)
+}
+traffic_df <- interpolate_traffic(traffic, district_hash)
+
+##merge traffic
+working_test <- merge(working_test, traffic_df, by = "ts", all=T)
+s <- working_test[rowSums(is.na(working_test))>0,]
+
+
+##Next step is to create prediction. May make sense to try both a linear regression
+##i.e. based on the time of day and location, how many gaps there would be
+##doesn't seem all that robust to me though. Or some kind of time series prediction.
+##then do model selection for each district and see which one has the lowest MAPE.
+
+##General linear model? Add Day of week as factor, and time of day, etc.?
