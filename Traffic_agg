@@ -1,0 +1,81 @@
+##Traffic agg
+files_traffic <- list.files(path="C:/Users/zachary.demby/Desktop/Didi/Data/season_1/training_data/traffic_data", full.names=T, recursive=FALSE)
+colnames_traffic <- c("District hash", "tj_level_1", "tj_level_2", 
+                      "tj_level_3", "tj_level_4", "tj_time")
+test_traffic <- read.table("C:/Users/zachary.demby/Desktop/Didi/Data/season_1/training_data/traffic_data/traffic_data_2016-01-01","\t", header=FALSE)
+
+##intiialize empty df
+new_df_traffic <- data.frame("District hash" = factor(),"tj_level_1" = character(), 
+                             "tj_level_2" = character(), "tj_level_3" = character(), 
+                             "tj_level_4" = character(), "tj_time" = as.POSIXct(character()))
+
+##Function to read in table, seperate by district and create new file
+agg_traffic <- lapply(files_traffic, function(x) {
+  t <- read.table(x, header=F,sep ="\t" ) # load file
+  colnames(t) <- colnames_traffic
+  new_df_traffic <- rbind(new_df_traffic, t)
+})
+new_traffic <- do.call("rbind", agg_traffic)
+trim_traffic <- new_traffic
+trim_traffic$tj_level_1 = as.numeric(substr(trim_traffic$tj_level_1,3,nchar(as.character(trim_traffic$tj_level_1))))
+trim_traffic$tj_level_12 = as.numeric(substr(trim_traffic$tj_level_12,3,nchar(as.character(trim_traffic$tj_level_12))))
+trim_traffic$tj_level_3 = as.numeric(substr(trim_traffic$tj_level_3,3,nchar(as.character(trim_traffic$tj_level_3))))
+trim_traffic$tj_level_4 = as.numeric(substr(trim_traffic$tj_level_4,3,nchar(as.character(trim_traffic$tj_level_4))))
+
+colnames(trim_traffic) <- colnames_traffic
+
+##add ts
+trim_traffic$tj_time <- as.POSIXct(trim_traffic$tj_time)
+trim_traffic$hour <- hour(trim_traffic$tj_time) + minute(trim_traffic$tj_time)/60 + second(trim_traffic$tj_time)/3600
+bins <- seq(1, 144, 1)
+# Bin the data
+trim_traffic$bin <- cut(trim_traffic$hour, breaks = seq(0, 24,by = (1/6)), labels = bins)
+write.csv(trim_traffic, "C:/Users/zachary.demby/Desktop/Didi/Data/Traffic_agg/traffic_agg.csv")
+
+traffic <- read.csv("C:/Users/zachary.demby/Desktop/Didi/Data/Traffic_agg/traffic_agg.csv")
+
+##Interpolate missing Traffic values 
+interpolate_traffic <- function(traffic, district_hash){
+ts <- as.data.frame(working_test$ts)
+colnames(ts) <- c("ts")
+trim <- function (x) gsub( " .*$", "", x)
+
+traffic <- traffic[which(traffic$District.hash == district_hash),]
+traffic$X <- NULL
+traffic <- traffic[!duplicated(traffic),]
+traffic$tj_time <- as.POSIXct(traffic$tj_time)
+traffic <- traffic[order(traffic$tj_time),]
+##take the traffic data closest to begining of the time window bin
+traffic$ts <- paste(trim(traffic$tj_time), traffic$bin, sep="-")
+
+t <- duplicated(traffic$ts)
+new_traffic <- traffic[!t,]
+merged_traffic <- merge.data.frame(ts, new_traffic, all.x=T, by = "ts") 
+merged_traffic$Date = substr(merged_traffic$ts,1,10)
+merged_traffic$bin = as.numeric(substr(merged_traffic$ts,12,nchar(as.character(merged_traffic$ts))))
+merged_traffic$District.hash <- district_hash
+merged_traffic <- merged_traffic[order(merged_traffic$Date, merged_traffic$bin),]
+merged_traffic$ts <- as.factor(merged_traffic$ts)
+s <- merged_traffic[rowSums(is.na(merged_traffic))>0,]
+
+tj_1_zoo <- zoo(merged_traffic[, c("tj_level_1")])
+tj_2_zoo <- zoo(merged_traffic[, c("tj_level_2")])
+tj_3_zoo <- zoo(merged_traffic[, c("tj_level_3")])
+tj_4_zoo <- zoo(merged_traffic[, c("tj_level_4")])
+
+new_tj_1_zoo <- na.approx(tj_1_zoo,x=index(tj_1_zoo), na.rm=F, rule = 2)
+new_tj_2_zoo <- na.approx(tj_2_zoo,x=index(tj_2_zoo), na.rm=F, rule = 2)
+new_tj_3_zoo <- na.approx(tj_3_zoo,x=index(tj_3_zoo), na.rm=F, rule = 2)
+new_tj_4_zoo <- na.approx(tj_4_zoo,x=index(tj_4_zoo), na.rm=F,rule = 2)
+
+
+full_traffic_agg <- as.data.frame(cbind(ts = as.vector(merged_traffic$ts), tj_level_1 = new_tj_1_zoo,
+                                        tj_level_2 = new_tj_2_zoo,tj_level_3 = new_tj_3_zoo,
+                                        tj_level_4 = new_tj_4_zoo))
+
+return(full_traffic_agg)
+}
+
+test_traffic <- interpolate_traffic(traffic, district_hash)
+
+s2 <- full_traffic_agg[rowSums(is.na(full_traffic_agg))>0,]
